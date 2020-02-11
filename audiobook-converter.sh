@@ -1,11 +1,23 @@
 #!/bin/bash
 
+# This setting determines the final filename format you prefer. You can set this
+# to whatever you'd like as long as you keep the formatting in tact. Options are:
+# [author]      - will be replaced by the author
+# [title]       - will be replaced by the title
+# [subtitle]    - will be replaced by the subtitle
+# [year]        - will be replaced by the year
+# [series-name] - will be replaced by the name of the book series
+# [book-number] - will be replaced by the book number within the series
+filename_format='[author] - [title] - [subtitle] ([year])'
+
 # Set Defaults
-bitrate="64k"
-khz="44100"
-genre="Audiobook"
+debug=0
+bitrate=64k
+sample_rate=44100
+channels=1  # 1 for mono 2 for stereo (mono is recommended for smaller file sizes)
+genre=Audiobook
 track=1
-overwrite=y # Set to n not overwrite existing output mp3 file
+overwrite=y  # Set to 'n' to prevent overwriting the existing output mp3 file
 
 ## Detect environment
 if [[ "$(cat /proc/version 2>/dev/null)" =~ CYGWIN|MINGW|Microsoft ]]; then
@@ -26,10 +38,16 @@ else
 fi
 
 # Define vars
-script_dir="$(cd $(dirname "$0") && echo $(pwd))"
-ffmpeg_cmd="$script_dir/ffmpeg/$os/$ffmpeg_bin"
-ffmpeg_args="-hide_banner -loglevel error"
 list=list.txt
+script_dir="$(cd $(dirname "$0") && echo $(pwd))"
+ffmpeg_cmd="$script_dir/ffmpeg/$ffmpeg_bin"
+if [[ "$debug" -eq 1 ]]; then
+  # Turn up debug output
+  ffmpeg_args="-hide_banner -loglevel level+info"
+else
+  # Show only errors
+  ffmpeg_args="-hide_banner -loglevel level+fatal"
+fi
 
 # Define colors
 green="\e[32m"
@@ -56,6 +74,11 @@ printf "$menu ║                         ║ $n\n"
 printf "$menu ╚═════════════════════════╝ $n\n"
 printf "\n"
 
+# Turn single quote (') into escaped single quote ('\'')
+escape_single_quotes() {
+  echo "$1" | sed -e 's/'\''/'\''\\'\'''\''/g'
+}
+
 # Take the first image file as the cover art
 cover="$(ls *.jpg *.jpeg *.png 2>/dev/null | head -n1)"
 if [[ "$cover" == "" ]]; then
@@ -79,15 +102,15 @@ printf "${message}Creating list of mp3 files...$n\n\n"
 test -f $list && rm $list
 for f in *.mp3; do
   # Detect any single quotes and convert to: '\''
-  output+="file '$(echo "$f" | sed -e 's/'\''/'\''\\'\'''\''/g')'"$'\n'
+  output+="file '$(escape_single_quotes "$f")'"$'\n'
 done
 echo "$output" > $list
 
 # Get metadata
 directory="${PWD##*/}"
-possible_author="$(echo "$directory" | awk -F' - ' '{print $1}' 2>/dev/null)"
-possible_title="$(echo "$directory" | awk -F' - ' '{print $2}' 2>/dev/null)"
-possible_subtitle="$(echo "$directory" | awk -F' - ' '{print $3}' 2>/dev/null)"
+possible_author="$(echo "$directory" | awk -F ' - ' '{print $1}' 2>/dev/null)"
+possible_title="$(echo "$directory" | awk -F ' - ' '{print $2}' 2>/dev/null)"
+possible_subtitle="$(echo "$directory" | awk -F ' - ' '{print $3}' 2>/dev/null)"
 
 # Get Author
 printf "${prompt}Who is the Author? [$possible_author]$n\n"
@@ -100,7 +123,6 @@ read title
 test "$title" == "" && title="$possible_title" && tput cuu1 && printf "$title\n\n" || echo
 
 # Get Subtitle
-output_file="$author - $title.mp3"
 printf "${prompt}What is the Subtitle"
 test "$possible_subtitle" != "" && printf "? [$possible_subtitle]" || printf " (if any)?"
 printf "$n\n"
@@ -108,41 +130,66 @@ read subtitle
 if [[ "$subtitle" == "" ]]; then
   if [[ "$possible_subtitle" != "" ]]; then
     subtitle="$possible_subtitle"
-    output_file="$author - $title - $subtitle.mp3"
-    title="$title: $subtitle"
+    new_title="$title: $subtitle"
     tput cuu1
     printf "$subtitle\n"
   fi
 else
-  output_file="$author - $title - $subtitle.mp3"
-  title="$title: $subtitle"
+  new_title="$title: $subtitle"
 fi
 
 # Get Year
 printf "\n${prompt}What year was this audiobook released?$n\n"
 read year
 
+# Determine output format
+output_file="$(echo "$filename_format.mp3" | sed -e 's/\[author\]/'"$author"'/g' -e 's/\[title\]/'"$title"'/g' \
+  -e 's/\[subtitle\]/'"$subtitle"'/g' -e 's/\[year\]/'"$year"'/g')"
+
+# Check if overwrite is set to 'n' and the output file already exists
+if [[ "$overwrite" =~ n|N ]] && [[ -f "$output_file" ]]; then
+  printf "\nOutput MP3 file already exists.\n\nSkipping.$n\n\n"
+  test -f "$list" && rm "$list"
+  exit 0
+fi
+
+# Make sure output file is not listed in temporary list of files to process (for repeated runs)
+escaped_output_file="$(escape_single_quotes "$output_file")"
+grep_output="$(grep -Fn "$escaped_output_file" "$list")"
+if [[ "$grep_output" != "" ]]; then
+  line_to_delete="$(echo "$grep_output" | cut -d':' -f1)"
+  sed -i "${line_to_delete}d" "$list"
+fi
+
 # Encode
 printf "\n${message}Encoding...$n\n"
+
 if [[ $use_cover -eq 0 ]]; then
   # Encode without cover art
-  "$ffmpeg_cmd" $ffmpeg_args -$overwrite -f concat -safe 0 -i "$list" \
-    -ac 1 -ab $bitrate -ar $khz -id3v2_version 3 -c:a copy \
-    -metadata artist="$author" -metadata title="$title" -metadata album="$title" \
+  "$ffmpeg_cmd" $ffmpeg_args -y -f concat -safe 0 -i "$list" \
+    -ab $bitrate -ar $sample_rate -ac $channels -id3v2_version 3 -c:a copy \
+    -metadata artist="$author" -metadata title="$new_title" -metadata album="$title" \
     -metadata genre="$genre" -metadata track="$track" -metadata date="$year" \
     "$output_file"
-  test $? -eq 0 && printf "Done\n\n" || printf "${error}ERROR: Failed to create MP3 file\n\n"
+  result=$?
 else
   # Encode with cover art
-  "$ffmpeg_cmd" $ffmpeg_args -$overwrite -f concat -safe 0 -i "$list" \
+  "$ffmpeg_cmd" $ffmpeg_args -y -f concat -safe 0 -i "$list" \
     -i "$cover" -c:v copy -map 0:0 -map 1:0 \
-    -ac 1 -ab $bitrate -ar $khz -id3v2_version 3 -c:a copy \
-    -metadata artist="$author" -metadata title="$title" -metadata album="$title" \
+    -ab $bitrate -ar $sample_rate -ac $channels -id3v2_version 3 -c:a copy \
+    -metadata artist="$author" -metadata title="$new_title" -metadata album="$title" \
     -metadata genre="$genre" -metadata track="$track" -metadata date="$year" \
     "$output_file"
-  test $? -eq 0 && printf "Done\n\n" || printf "${error}ERROR: Failed to create MP3 file\n\n"
+  result=$?
 fi
 
 # Done
-printf "${message}Created Audiobook file:$n\n$selected$output_file$n\n\n"
 test -f "$list" && rm "$list"
+if [[ "$result" -eq 0 ]]; then
+  printf "Done\n\n"
+  printf "${message}Created Audiobook file:$n\n$selected$output_file$n\n\n"
+else
+  printf "${error}ERROR: Failed to create MP3 file$n\n\n"
+  printf "You can enable debugging mode and re-run it to see what the problem is.\n\n"
+  printf "See the readme.md file for more details.\n\n"
+fi
